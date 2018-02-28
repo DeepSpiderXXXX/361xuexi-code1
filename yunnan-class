@@ -1,0 +1,240 @@
+"""
+Created on Wed Jan 31 14:51:28 2018
+
+@author: 陈才
+"""
+
+
+# This Python 3 environment comes with many helpful analytics libraries installed
+# It is defined by the kaggle/python docker image: https://github.com/kaggle/docker-python
+# For example, here's several helpful packages to load in 
+
+import numpy as np # linear algebra
+import pandas as pd # data processing, CSV file I/O (e.g. pd.read_csv)
+from nltk.corpus import stopwords
+import string
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.model_selection import train_test_split
+import xgboost as xgb
+import gc
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn import *
+
+# Input data files are available in the "../input/" directory.
+# For example, running this (by clicking run or pressing Shift+Enter) will list the files in the input directory
+
+from subprocess import check_output
+
+train = pd.read_csv('data/train_first.csv')
+test = pd.read_csv('data/predict_first.csv')
+
+#train['Score'] = train['Score'].apply(lambda x:x-1)
+
+
+train = train.fillna("无")
+test = test.fillna("无")
+
+scoreDict = [{},{},{},{},{}] 
+fluent = [587,973,9398,28954,60097]
+dictSet = set()
+
+
+import jieba  
+import jieba.posseg as pseg  
+def splitword(dicuss):
+    seg_list = jieba.cut(dicuss)
+    return ' '.join(seg_list)
+
+def splitchar(dicuss):
+    seg_list = ''
+    for i in dicuss:
+        seg_list = seg_list + str(i) +' '
+    if(len(seg_list)==0):
+        seg_list = '无'
+    return seg_list
+def getDict(x):
+    seg_list = jieba.cut(x['Discuss'])
+    score = x['Score'] - 1
+    for word in seg_list:
+        dictSet.add(word)
+        if word in scoreDict[score].keys():
+            scoreDict[score][word] = scoreDict[score][word] +1
+        else :
+            scoreDict[score][word] = 1
+            
+def getFluent(dictname,word):
+    if word in dictname.keys():
+        return dictname[word]
+    else :
+        return 0
+def getProbalility(word):
+    total = 0
+    scorefluent = []
+    for i in range(5):
+        scorefluent.append(getFluent(scoreDict[i],word))
+        total = total + scorefluent[i] 
+    scorefluent = np.array(scorefluent)
+    if total !=0: 
+        scorefluent = scorefluent
+    scorefluent = scorefluent.tolist()
+    scorefluent.insert(0,word)
+    scorefluent.append(total)
+    return scorefluent
+    
+    
+   
+def buildeProbability():
+    dictProbability = [] 
+    for word in dictSet:
+        dictProbability.append(getProbalility(word))
+    dictProbability = pd.DataFrame(dictProbability)
+    dictProbability.columns=['word','Score1','Score2','Score3','Score4','Score5','total']
+    for i in range(5):
+        dictProbability['Score'+str(i+1)+'_p'] = dictProbability['Score'+str(i+1)] / fluent[i]
+    dictProbability['Score_p']  =   dictProbability['Score1_p'] + dictProbability['Score2_p'] + dictProbability['Score3_p'] + dictProbability['Score4_p'] + dictProbability['Score5_p'] 
+    
+    for i in range(5):
+        dictProbability['Score'+str(i+1)+'_p'] = dictProbability['Score'+str(i+1)+'_p'] / dictProbability['Score_p']
+    
+    
+    return dictProbability
+    
+
+
+train.Discuss = train.Discuss.replace('[^\u4e00-\u9fa5]','',regex=True)
+
+train['splitword'] = train['Discuss'].apply(lambda x:splitword(x)) 
+train['splitchar'] = train['Discuss'].apply(lambda x:splitchar(x))
+train['wordlength'] = train['Discuss'].apply(lambda x:len(x)) 
+#train = train[train.wordlength<=10]
+train.apply(getDict,axis=1)
+dictProbability_ = buildeProbability()
+
+train['Score'] = train['Score'] / 5
+
+test.Discuss = test.Discuss.replace('[^\u4e00-\u9fa5]','',regex=True)
+
+test['splitword'] = test['Discuss'].apply(lambda x:splitword(x))
+test['splitchar'] = test['Discuss'].apply(lambda x:splitchar(x))
+test['wordlength'] = test['Discuss'].apply(lambda x:len(x))  
+#test = test[test.wordlength<=10]
+
+maxlength = 50
+
+
+dictProbability_dict = {}
+
+for i in dictProbability_.index:
+    cols = ['Score1_p','Score2_p','Score3_p','Score4_p','Score5_p'] 
+    dictProbability_dict[dictProbability_.iloc[i].word] = np.array(dictProbability_.iloc[i][cols])
+    
+def getVector(discuss):
+    
+    
+    v = np.zeros((maxlength,len(cols)))
+    seg_list = jieba.cut(discuss) 
+    for index,word in enumerate(seg_list):
+        if index == maxlength:
+            break;
+        if word in dictProbability_dict.keys():
+            v[index,:] = dictProbability_dict[word]
+        else :
+            continue
+    return v
+        
+            
+    
+def getX(dataset):
+    vectors = []
+    nrow = dataset.shape[0]
+    for i in  dataset.index:
+        vector = getVector(dataset.iloc[i].Discuss)
+        vectors.append(vector)
+        print(str(i)+'/'+str(nrow)) 
+    return vectors
+
+
+from sklearn.feature_extraction.text import CountVectorizer  
+
+train_x_ = getX(train)
+train_x_ = np.array(train_x_).reshape((len(train_x_),-1))
+
+test_x_ = getX(test)
+test_x_ = np.array(test_x_).reshape((len(test_x_),-1))
+
+
+gc.collect()
+
+
+train_x, valid_x, train_y, valid_y = train_test_split(train_x_,train[['Score']], test_size=0.2, random_state=2)
+
+train_x, valid_x, train_y, valid_y = train_x_[:-10000],train_x_[-10000:],train[['Score']][:-10000],train[['Score']][-10000:]
+
+
+
+import xgboost as xgb
+
+def precision(test_y,predict_y):
+    rmse = np.sqrt(np.mean((np.array(test_y).reshape(-1)-np.array(predict_y).reshape(-1))**2))
+    print(rmse)
+    return 1/(1+rmse)
+
+def runXGB(train_X, train_y, test_X, test_y=None, feature_names=None, seed_val=2017, num_rounds=2000):
+    param = {}
+    param['objective'] = 'reg:logistic'
+ #   param['num_class'] = 5
+    param['eta'] =  0.12
+    param['max_depth'] = 6
+    param['silent'] = 1
+    param['eval_metric'] = 'rmse'
+    param['min_child_weight'] = 1
+    param['subsample'] = 0.8
+  #  param['colsample_bytree'] = 0.7
+    param['seed'] = seed_val
+    num_rounds = num_rounds
+
+    plst = list(param.items())
+    xgtrain = xgb.DMatrix(train_X, label=train_y)
+
+    if test_y is not None:
+        xgtest = xgb.DMatrix(test_X,label=test_y)
+        watchlist = [ (xgtrain,'train'), (xgtest, 'test') ]
+        model = xgb.train(plst, xgtrain, num_rounds, watchlist, early_stopping_rounds=100)
+    else:
+        xgtest = xgb.DMatrix(test_X)
+        model = xgb.train(plst, xgtrain, num_rounds)
+
+    pred_test_y = model.predict(xgtest)
+    precisions = precision(test_y*5,pred_test_y*5)
+    return model,precisions
+    
+
+col = ['Score']
+preds = np.zeros((test.shape[0]))
+
+    
+
+model,precisions = runXGB(train_x, train_y, valid_x,valid_y)
+print('score:'+str(precisions))
+preds = model.predict(xgb.DMatrix(test_x_))
+gc.collect()
+ 
+submid = pd.DataFrame({'Id': test["Id"],'Score':preds.reshape(-1),'Discuss':test['Discuss']})
+submid['Score'] = submid['Score'] * 5
+
+def formatSocre(x):
+    if x>5:
+        return 5
+    if x<1:
+        return 1
+    return x
+
+submid['Score'] = submid['Score'].apply(lambda x:formatSocre(x))
+
+
+#submid.Score = submid.Score.apply(lambda x : x+1)
+submission = submid
+submission.to_csv('yunnan-class.csv', index=False,header=False,columns=['Id','Score'])
+lowscore = submission[submission.Score<2]
+
+# Any results you write to the current directory are saved as output.
