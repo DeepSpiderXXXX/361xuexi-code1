@@ -1,0 +1,164 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Jan 31 14:51:28 2018
+
+@author: 陈才
+"""
+import numpy as np  # linear algebra
+import pandas as pd  # data processing, CSV file I/O (e.g. pd.read_csv)
+from nltk.corpus import stopwords
+import string
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.model_selection import train_test_split
+import xgboost as xgb
+import gc
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn import *
+
+# Input data files are available in the "../input/" directory.
+# For example, running this (by clicking run or pressing Shift+Enter) will list the files in the input directory
+
+from subprocess import check_output
+
+train = pd.read_csv('data/train_first.csv')
+test = pd.read_csv('data/predict_first.csv')
+
+# train['Score'] = train['Score'].apply(lambda x:x-1)
+train['Score'] = train['Score']
+
+train = train.fillna("unknown")
+test = test.fillna("unknown")
+
+import jieba
+import jieba.posseg as pseg
+
+
+def splitword(dicuss):
+    seg_list = jieba.cut(dicuss)
+    seg_list = dicuss.split('#')
+    return ' '.join(seg_list)
+
+
+train.Discuss = train.Discuss.replace('[^\u4e00-\u9fa5]', '', regex=True)
+
+train['splitword'] = train['Discuss'].apply(lambda x: splitword(x))
+train['wordlength'] = train['Discuss'].apply(lambda x: len(x))
+train['Score'] = train['Score'] / 5
+
+test.Discuss = test.Discuss.replace('[^\u4e00-\u9fa5]', '', regex=True)
+
+test['splitword'] = test['Discuss'].apply(lambda x: splitword(x))
+test['wordlength'] = test['Discuss'].apply(lambda x: len(x))
+
+X_train = train['splitword']
+y_train = train['Score']
+X_test = test['splitword']
+
+from keras.preprocessing import sequence
+from keras.models import Model, Input
+from keras.layers import Dense, SpatialDropout1D, Dropout
+from keras.layers import Embedding, GlobalMaxPool1D, BatchNormalization
+from keras.preprocessing.text import Tokenizer
+
+# Set parameters:
+max_features = 50000
+maxlen = 150
+batch_size = 32
+embedding_dims = 64
+epochs = 4
+
+print('Tokenizing data...')
+tok = Tokenizer(num_words=max_features)
+tok.fit_on_texts(list(X_train) + list(X_test))
+x_train = tok.texts_to_sequences(X_train)
+x_test = tok.texts_to_sequences(X_test)
+print(len(x_train), 'train sequences')
+print(len(x_test), 'test sequences')
+print('Average train sequence length: {}'.format(np.mean(list(map(len, x_train)), dtype=int)))
+print('Average test sequence length: {}'.format(np.mean(list(map(len, x_test)), dtype=int)))
+
+print('Pad sequences (samples x time)')
+x_train = sequence.pad_sequences(x_train, maxlen=maxlen)
+x_test = sequence.pad_sequences(x_test, maxlen=maxlen)
+print('x_train shape:', x_train.shape)
+print('x_test shape:', x_test.shape)
+
+print('Build model...')
+comment_input = Input((maxlen,))
+
+# we start off with an efficient embedding layer which maps
+# our vocab indices into embedding_dims dimensions
+comment_emb = Embedding(max_features, embedding_dims, input_length=maxlen)(comment_input)
+
+# we add a GlobalMaxPool1D, which will extract information from the embeddings
+# of all words in the document
+comment_emb = SpatialDropout1D(0.25)(comment_emb)
+max_emb = GlobalMaxPool1D()(comment_emb)
+
+# normalized dense layer followed by dropout
+main = BatchNormalization()(max_emb)
+main = Dense(64)(main)
+main = Dropout(0.5)(main)
+
+# We project onto a six-unit output layer, and squash it with sigmoids:
+output = Dense(1, activation='relu')(main)
+
+model = Model(inputs=comment_input, outputs=output)
+
+model.compile(loss='mse',
+              optimizer='adam',
+              metrics=['mse'])
+
+hist = model.fit(x_train, y_train, batch_size=batch_size, epochs=epochs, validation_split=0.1)
+
+
+y_pred = model.predict(x_test)
+
+submid = pd.DataFrame({'Id': test["Id"], 'Score': y_pred.reshape(-1), 'Discuss': test['Discuss']})
+submid['Score'] = submid['Score'] * 5
+
+
+def formatSocre(x):
+    if x > 5:
+        return 5
+    if x < 1:
+        return 1
+    return x
+
+
+submid['Score'] = submid['Score'].apply(lambda x: formatSocre(x))
+
+import time
+import datetime
+
+t = time.time()
+
+print('fasttext-' + str(int(t)) + '.csv')
+# submid.Score = submid.Score.apply(lambda x : x+1)
+submission = submid
+submission.to_csv('fasttext-' + str(int(t)) + '.csv', index=False, header=False, columns=['Id', 'Score'])
+
+lowscore = submission[submission.Score < 2]
+
+'''
+
+for index in result.index:
+    score = result.loc[index].Score
+    if (score > 4.8) and (score<5):
+        score = 5
+    if (score > 3.8 ) and (score<4):
+        score = 4
+    if (score > 2.8 ) and ( score<3):
+        score = 3
+    if (score > 1.8) and (score<2):
+        score = 2
+    if (score > 0.8) and (score<1):
+        score = 1
+    result_score.append(score)
+
+
+result['nScore'] = result_score
+
+result.to_csv('result-format.csv', index=False,header=False,columns=['Id','nScore'])
+
+'''
