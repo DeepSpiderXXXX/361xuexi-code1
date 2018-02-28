@@ -1,0 +1,157 @@
+# This Python 3 environment comes with many helpful analytics libraries installed
+# It is defined by the kaggle/python docker image: https://github.com/kaggle/docker-python
+# For example, here's several helpful packages to load in 
+
+import numpy as np # linear algebra
+import pandas as pd # data processing, CSV file I/O (e.g. pd.read_csv)
+from nltk.corpus import stopwords
+import string
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.model_selection import train_test_split
+import xgboost as xgb
+import gc
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn import *
+
+# Input data files are available in the "../input/" directory.
+# For example, running this (by clicking run or pressing Shift+Enter) will list the files in the input directory
+
+from subprocess import check_output
+
+train = pd.read_csv('data/train_first.csv')
+test = pd.read_csv('data/predict_first.csv')
+
+#train['Score'] = train['Score'].apply(lambda x:x-1)
+train['Score'] = train['Score'] / 5
+
+train = train.fillna("无")
+test = test.fillna("无")
+
+import jieba  
+import jieba.posseg as pseg  
+def splitword(dicuss):
+    seg_list = jieba.cut(dicuss)
+    return ' '.join(seg_list)
+
+def splitchar(dicuss):
+    seg_list = ''
+    for i in dicuss:
+        seg_list = seg_list + str(i) +' '
+    if(len(seg_list)==0):
+        seg_list = '无'
+    return seg_list
+
+
+train.Discuss = train.Discuss.replace('[^\u4e00-\u9fa5]','',regex=True)
+
+train['splitword'] = train['Discuss'].apply(lambda x:splitword(x)) 
+train['splitchar'] = train['Discuss'].apply(lambda x:splitchar(x))
+train['wordlength'] = train['Discuss'].apply(lambda x:len(x)) 
+#train = train[train.wordlength<=10]
+
+test.Discuss = test.Discuss.replace('[^\u4e00-\u9fa5]','',regex=True)
+
+test['splitword'] = test['Discuss'].apply(lambda x:splitword(x))
+test['splitchar'] = test['Discuss'].apply(lambda x:splitchar(x))
+test['wordlength'] = test['Discuss'].apply(lambda x:len(x))  
+#test = test[test.wordlength<=10]
+
+
+
+from sklearn.feature_extraction.text import CountVectorizer  
+
+tfidf = feature_extraction.text.TfidfVectorizer(max_features=50000)
+transformer = tfidf.fit(train['splitword'])
+
+tfidf_char = feature_extraction.text.TfidfVectorizer(max_features=10000,analyzer ='char')
+transformer_char = tfidf_char.fit(train['splitchar'])
+
+
+comments_train = transformer.transform(train['splitword'])
+comments_test = transformer.transform(test['splitword'])
+
+
+comments_train_char = transformer_char.transform(train['splitchar'])
+comments_test_char = transformer_char.transform(test['splitchar'])
+
+
+import scipy.sparse as sparse
+
+comments_train_word_char = sparse.hstack([comments_train,comments_train_char])
+
+comments_test_word_char = sparse.hstack([comments_test,comments_test_char])
+
+
+gc.collect()
+
+
+train_x, valid_x, train_y, valid_y = train_test_split(comments_train_word_char,train[['Score']], test_size=0.2, random_state=2)
+
+
+
+import xgboost as xgb
+
+def precision(test_y,predict_y):
+    rmse = np.sqrt(np.mean((np.array(test_y).reshape(-1)-np.array(predict_y).reshape(-1))**2))
+    print(rmse)
+    return 1/(1+rmse)
+
+def runXGB(train_X, train_y, test_X, test_y=None, feature_names=None, seed_val=2017, num_rounds=2000):
+    param = {}
+    param['objective'] = 'reg:logistic'
+ #   param['num_class'] = 5
+    param['eta'] =  0.12
+    param['max_depth'] = 6
+    param['silent'] = 1
+    param['eval_metric'] = 'rmse'
+    param['min_child_weight'] = 1
+    param['subsample'] = 0.8
+  #  param['colsample_bytree'] = 0.7
+    param['seed'] = seed_val
+    num_rounds = num_rounds
+
+    plst = list(param.items())
+    xgtrain = xgb.DMatrix(train_X, label=train_y)
+
+    if test_y is not None:
+        xgtest = xgb.DMatrix(test_X, label=test_y)
+        watchlist = [ (xgtrain,'train'), (xgtest, 'test') ]
+        model = xgb.train(plst, xgtrain, num_rounds, watchlist, early_stopping_rounds=200)
+    else:
+        xgtest = xgb.DMatrix(test_X)
+        model = xgb.train(plst, xgtrain, num_rounds)
+
+    pred_test_y = model.predict(xgtest)
+    precisions = precision(test_y,pred_test_y)
+    return model,precisions
+    
+
+col = ['Score']
+preds = np.zeros((test.shape[0]))
+
+    
+
+model,precisions = runXGB(train_x, train_y, valid_x,valid_y)
+print('score:'+str(precisions))
+preds = model.predict(xgb.DMatrix(comments_test_word_char))
+gc.collect()
+ 
+submid = pd.DataFrame({'Id': test["Id"],'Score':preds.reshape(-1),'Discuss':test['Discuss']})
+submid['Score'] = submid['Score'] * 5
+
+def formatSocre(x):
+    if x>5:
+        return 5
+    if x<1:
+        return 1
+    return x
+
+submid['Score'] = submid['Score'].apply(lambda x:formatSocre(x))
+
+
+#submid.Score = submid.Score.apply(lambda x : x+1)
+submission = submid
+submission.to_csv('yunnan-word-char.csv', index=False,header=False,columns=['Id','Score'])
+    
+
+# Any results you write to the current directory are saved as output.
